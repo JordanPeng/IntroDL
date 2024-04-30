@@ -4,19 +4,34 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.optim import Adam
 from torch.nn.parameter import Parameter
-from Project.model.text_model import LoraLLaMA
+from model.text_model import LoraLLaMA
+# from model.text_model_lora_by_replace_attention import LoraLLaMA
 from torch.optim import Adam
+from transformers import LlamaForCausalLM, LlamaTokenizer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model_mode = "lora"
 
-model_name = "JackFram/llama-68m"  # Example model
-model = LoraLLaMA(model_name, device=device)
-# print(model.lora_parameters)
+if model_mode == "lora":
+    model_name = "JackFram/llama-68m"  # Example model
+    model = LoraLLaMA(model_name, device=device)
+    tokenizer = model.tokenizer
+elif model_mode == "ori_68M_model":
+    model_name = "JackFram/llama-68m"
+    model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto')
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    model.resize_token_embeddings(len(tokenizer))
+else:
+    model_name = "baffo32/decapoda-research-llama-7B-hf"
+    model = LlamaForCausalLM.from_pretrained(model_name, device_map='auto')
+    tokenizer = LlamaTokenizer.from_pretrained(model_name)
+    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    model.resize_token_embeddings(len(tokenizer))
+
 model.to(device)
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 # Hyperparameters and optimizer
-learning_rate = 2e-5
+learning_rate = 2e-3
 
 
 # Dummy dataset and dataloader
@@ -33,16 +48,17 @@ def prepare_input_output(examples):
     # Labels are the full input_ids
     labels_full = inputs.input_ids.clone()
 
-    # Mask the first half of the labels so the loss is calculated only on the second half
-    labels_full[:, :half_seq_length] = -100
+    # Args — labels (torch.LongTensor of shape (batch_size, sequence_length), optional): Labels for computing the masked language modeling loss. Indices should either be in [0, ..., config.vocab_size] or -100 (see input_ids docstring). Tokens with indices set to -100 are ignored (masked), the loss is only computed for the tokens with labels in [0, ..., config.vocab_size].
+    # labels_full[:, :half_seq_length] = -100
 
     # Create attention masks that match the first half of each sequence
     # Attention mask should be 1 for all tokens in the first half and 0 for the rest
-    attention_masks = torch.zeros_like(inputs.input_ids)
-    attention_masks[:, :half_seq_length] = 1
+    attention_masks = torch.ones_like(inputs.input_ids)
+    # attention_masks = torch.zeros_like(inputs.attention_mask)
+    # attention_masks[:, :half_seq_length] = 1
 
     return {
-        "input_ids": input_ids_half,
+        "input_ids": inputs.input_ids,
         "labels": labels_full,
         "attention_mask": attention_masks
     }
@@ -60,17 +76,31 @@ processed_dataset = dataset.map(prepare_input_output, batched=True)
 processed_dataset.set_format(type='torch', columns=['input_ids', 'labels', 'attention_mask'])
 dataloader = DataLoader(processed_dataset, batch_size=4, collate_fn=collate_fn)
 
-optimizer = Adam(model.lora_parameters, lr=2e-5)
-
+# optimizer = torch.optim.Adam([
+#     {'params': model.lora_params, 'lr': 2e-3},
+# ])
+optimizer = Adam(model.parameters(), lr=learning_rate)
 # Manual training loop
 model.train()
 num_epochs = 10
 for epoch in range(num_epochs):
     total_loss = 0
-    for batch in dataloader:
+    for index, batch in enumerate(dataloader):
         optimizer.zero_grad()
         outputs = model(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'], labels=batch['labels'])
         loss = outputs.loss
+
+        prediction = outputs.logits.argmax(dim=-1)
+        predict_text = tokenizer.batch_decode(prediction)[0]
+        original_text = tokenizer.batch_decode(batch['input_ids'])[0]
+        original_label = tokenizer.batch_decode(batch['labels'])[0]
+
+        if epoch == 4 and index in [0, 1, 2, 3]:
+            print(f"Predicted text: {predict_text}")
+            print(f"Original text: {original_text}")
+            print(f"Original label: {original_label}")
+            print(f"Loss: {loss.item()}")
+            print()
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
