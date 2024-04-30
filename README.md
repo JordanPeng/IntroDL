@@ -1,1 +1,1 @@
-Run IntroDL/main.py directly
+Run script/main.py directly
